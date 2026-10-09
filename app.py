@@ -17,22 +17,39 @@ st.set_page_config(
     layout="wide",
 )
 
-SPREADSHEET_ID = "1IVNFi2DIUIRNW7jPMZ5zHA6anUtHkGeCJzN2UmooZTQ"
+# Archivo 1: distribución
+SPREADSHEET_ID_DISTRIBUCION = (
+    "1IVNFi2DIUIRNW7jPMZ5zHA6anUtHkGeCJzN2UmooZTQ"
+)
 
-HOJAS_ITEMS = {
+# Archivo 2: control de pérdidas
+SPREADSHEET_ID_PERDIDAS = (
+    "1xhimNssLjBwgaT77gS0edeHA4QJntY-ueYcQs0UVBU0"
+)
+
+# Hojas maestras de cada archivo
+HOJAS_DISTRIBUCION = {
     "ITEM II": "ITEM_II",
     "ITEM III": "ITEM_III",
     "ITEM IV": "ITEM_IV",
 }
 
+HOJAS_PERDIDAS = {
+    "TingoMaria": "TingoMaria",
+    "Huanuco": "Huanuco",
+    "Pasco": "Pasco",
+    "Facturacion": "Facturacion",
+    "Sedapal": "Sedapal",
+    "Hidrandina": "Hidrandina",
+}
+
 
 # ============================================================
-# ESTILOS ADAPTABLES A MODO CLARO Y OSCURO
+# ESTILOS: MODO CLARO Y OSCURO
 # ============================================================
 
 st.markdown("""
 <style>
-/* Utilizar los colores del tema seleccionado en Streamlit */
 .stApp {
     background-color: var(--background-color);
     color: var(--text-color);
@@ -46,7 +63,6 @@ h1, h2, h3, h4, p, label,
     color: var(--text-color);
 }
 
-/* Indicadores */
 [data-testid="stMetric"] {
     background-color: var(--secondary-background-color);
     border: 1px solid rgba(128, 128, 128, 0.30);
@@ -54,24 +70,20 @@ h1, h2, h3, h4, p, label,
     border-radius: 10px;
 }
 
-/* Campos de selección */
 div[data-baseweb="select"] > div {
     background-color: var(--secondary-background-color);
 }
 
-/* Botones */
 .stDownloadButton button {
     width: 100%;
     border-radius: 8px;
 }
 
-/* Tablas: conservar el estilo nativo para respetar ambos temas */
 [data-testid="stDataFrame"] {
     border: 1px solid rgba(128, 128, 128, 0.25);
     border-radius: 8px;
 }
 
-/* Mensajes y textos secundarios */
 [data-testid="stCaptionContainer"] {
     opacity: 0.85;
 }
@@ -96,7 +108,7 @@ def conectar_google():
 
 
 # ============================================================
-# NORMALIZAR PLACAS
+# FUNCIONES AUXILIARES
 # ============================================================
 
 def normalizar_placa(valor):
@@ -116,21 +128,12 @@ def tiene_valor(valor):
     if valor is None:
         return False
 
-    texto = str(valor).strip()
+    return str(valor).strip().lower() not in (
+        "", "none", "nan", "nat"
+    )
 
-    return texto.lower() not in ("", "none", "nan", "nat")
-
-
-# ============================================================
-# CONVERTIR FECHAS
-# ============================================================
 
 def convertir_fecha(valor):
-    """
-    Convierte fechas de Google Sheets a pandas.Timestamp.
-    Admite formatos como 05/10/2026 y 2026-10-05.
-    """
-
     if not tiene_valor(valor):
         return pd.NaT
 
@@ -156,19 +159,42 @@ def mostrar_fecha(valor):
     return pd.Timestamp(valor).strftime("%d/%m/%Y")
 
 
+def nuevo_registro():
+    return {
+        "KM inicial registrado": False,
+        "KM final registrado": False,
+        "Registros encontrados": 0,
+        "Fecha último reporte": pd.NaT,
+        "Fecha último KM inicial": pd.NaT,
+        "Fecha último KM final": pd.NaT,
+    }
+
+
+def actualizar_fecha_mas_reciente(datos, campo, fecha):
+    if pd.isna(fecha):
+        return
+
+    fecha_actual = datos[campo]
+
+    if pd.isna(fecha_actual) or fecha > fecha_actual:
+        datos[campo] = fecha
+
+
 # ============================================================
-# LEER PLACAS MAESTRAS DE LOS COORDINADORES
-# Placa: columna B de cada hoja ITEM
+# LEER PLACAS MAESTRAS DEL ARCHIVO DE DISTRIBUCIÓN
+# Columna B: placa
 # ============================================================
 
 @st.cache_data(ttl=300, show_spinner=False)
-def cargar_placas_maestras():
+def cargar_placas_distribucion():
     cliente = conectar_google()
-    archivo = cliente.open_by_key(SPREADSHEET_ID)
+    archivo = cliente.open_by_key(
+        SPREADSHEET_ID_DISTRIBUCION
+    )
 
     resultado = {}
 
-    for nombre_item, nombre_hoja in HOJAS_ITEMS.items():
+    for nombre_item, nombre_hoja in HOJAS_DISTRIBUCION.items():
         hoja = archivo.worksheet(nombre_hoja)
         filas = hoja.get("B2:B")
 
@@ -187,160 +213,246 @@ def cargar_placas_maestras():
 
 
 # ============================================================
-# LEER HISTORIAL DE DISTRIBUCION
-#
-# A = FECHA
-# B = PLACA
-# C = HORA INICIO
-# D = KM INICIAL
-# E = HORA FIN
-# F = KM FINAL
+# LEER PLACAS MAESTRAS DEL ARCHIVO DE PÉRDIDAS
+# Columna B: PLACA DE VEHÍCULO
 # ============================================================
 
 @st.cache_data(ttl=300, show_spinner=False)
-def cargar_reportes():
+def cargar_placas_perdidas():
     cliente = conectar_google()
-    archivo = cliente.open_by_key(SPREADSHEET_ID)
-    hoja = archivo.worksheet("Distribucion")
+    archivo = cliente.open_by_key(
+        SPREADSHEET_ID_PERDIDAS
+    )
 
-    # Leemos A:F para obtener la fecha y los kilómetros.
-    filas = hoja.get("A2:F")
+    resultado = {}
 
+    for nombre_item, nombre_hoja in HOJAS_PERDIDAS.items():
+        hoja = archivo.worksheet(nombre_hoja)
+        filas = hoja.get("B2:B")
+
+        placas = set()
+
+        for fila in filas:
+            valor = fila[0] if fila else ""
+            placa = normalizar_placa(valor)
+
+            if placa:
+                placas.add(placa)
+
+        resultado[nombre_item] = placas
+
+    return resultado
+
+
+# ============================================================
+# PROCESAR HISTORIAL DE KILOMETRAJE
+# ============================================================
+
+def procesar_historial(filas, columna_placa,
+                       columna_inicial, columna_final):
     registros = {}
 
-    for fila in filas:
-        fila = fila + [""] * (6 - len(fila))
+    max_columna = max(
+        columna_placa,
+        columna_inicial,
+        columna_final,
+        0,
+    )
 
-        fecha = convertir_fecha(fila[0])  # Columna A
-        placa = normalizar_placa(fila[1])  # Columna B
-        km_inicial = fila[3]               # Columna D
-        km_final = fila[5]                 # Columna F
+    for fila in filas:
+        fila = fila + [""] * (max_columna + 1 - len(fila))
+
+        fecha = convertir_fecha(fila[0])
+        placa = normalizar_placa(fila[columna_placa])
+        km_inicial = fila[columna_inicial]
+        km_final = fila[columna_final]
 
         if not placa:
             continue
 
         if placa not in registros:
-            registros[placa] = {
-                "KM inicial registrado": False,
-                "KM final registrado": False,
-                "Registros encontrados": 0,
-                "Fecha último reporte": pd.NaT,
-                "Fecha último KM inicial": pd.NaT,
-                "Fecha último KM final": pd.NaT,
-            }
+            registros[placa] = nuevo_registro()
 
         datos = registros[placa]
         datos["Registros encontrados"] += 1
 
-        # Fecha más reciente en que aparece la placa.
-        if not pd.isna(fecha):
-            fecha_actual = datos["Fecha último reporte"]
+        actualizar_fecha_mas_reciente(
+            datos, "Fecha último reporte", fecha
+        )
 
-            if pd.isna(fecha_actual) or fecha > fecha_actual:
-                datos["Fecha último reporte"] = fecha
-
-        # KM inicial: conservar la fecha más reciente
-        # de un registro que tenga KM inicial.
         if tiene_valor(km_inicial):
             datos["KM inicial registrado"] = True
 
-            fecha_actual = datos["Fecha último KM inicial"]
+            actualizar_fecha_mas_reciente(
+                datos, "Fecha último KM inicial", fecha
+            )
 
-            if not pd.isna(fecha):
-                if pd.isna(fecha_actual) or fecha > fecha_actual:
-                    datos["Fecha último KM inicial"] = fecha
-
-        # KM final: conservar la fecha más reciente
-        # de un registro que tenga KM final.
         if tiene_valor(km_final):
             datos["KM final registrado"] = True
 
-            fecha_actual = datos["Fecha último KM final"]
-
-            if not pd.isna(fecha):
-                if pd.isna(fecha_actual) or fecha > fecha_actual:
-                    datos["Fecha último KM final"] = fecha
+            actualizar_fecha_mas_reciente(
+                datos, "Fecha último KM final", fecha
+            )
 
     return registros
 
 
 # ============================================================
-# GENERAR COMPARACIÓN POR ÍTEM
+# HISTORIAL DISTRIBUCION
+# A = Fecha, B = Placa, D = KM inicial, F = KM final
 # ============================================================
 
-def generar_reporte(placas_maestras, registros):
-    reportes = []
+@st.cache_data(ttl=300, show_spinner=False)
+def cargar_reportes_distribucion():
+    cliente = conectar_google()
+    archivo = cliente.open_by_key(
+        SPREADSHEET_ID_DISTRIBUCION
+    )
 
-    for nombre_item, placas in placas_maestras.items():
-        for placa in sorted(placas):
-            datos = registros.get(placa, {})
+    hoja = archivo.worksheet("Distribucion")
+    filas = hoja.get("A2:F")
 
-            inicial = datos.get(
-                "KM inicial registrado", False
-            )
-            final = datos.get(
-                "KM final registrado", False
-            )
-
-            if inicial and final:
-                estado = "COMPLETÓ KM INICIAL Y FINAL"
-            elif inicial:
-                estado = "SOLO KM INICIAL"
-            elif final:
-                estado = "SOLO KM FINAL"
-            else:
-                estado = "SIN REPORTE DE KM"
-
-            fecha_ultimo = datos.get(
-                "Fecha último reporte", pd.NaT
-            )
-            fecha_inicial = datos.get(
-                "Fecha último KM inicial", pd.NaT
-            )
-            fecha_final = datos.get(
-                "Fecha último KM final", pd.NaT
-            )
-
-            reportes.append({
-                "Ítem": nombre_item,
-                "Placa": placa,
-                "Estado": estado,
-                "KM inicial registrado": "Sí" if inicial else "No",
-                "Fecha último KM inicial": mostrar_fecha(fecha_inicial),
-                "KM final registrado": "Sí" if final else "No",
-                "Fecha último KM final": mostrar_fecha(fecha_final),
-                "Fecha último reporte": mostrar_fecha(fecha_ultimo),
-                "Registros encontrados": datos.get(
-                    "Registros encontrados", 0
-                ),
-            })
-
-    return pd.DataFrame(reportes)
+    # Dentro del rango A:F:
+    # A = 0, B = 1, D = 3, F = 5
+    return procesar_historial(
+        filas,
+        columna_placa=1,
+        columna_inicial=3,
+        columna_final=5,
+    )
 
 
 # ============================================================
-# INTERFAZ PRINCIPAL
+# HISTORIAL CONTROLPERDIDAS
+# A = Fecha, B = Placa, C = KM inicial, D = KM final
+# ============================================================
+
+@st.cache_data(ttl=300, show_spinner=False)
+def cargar_reportes_perdidas():
+    cliente = conectar_google()
+    archivo = cliente.open_by_key(
+        SPREADSHEET_ID_PERDIDAS
+    )
+
+    hoja = archivo.worksheet("ControlPerdidas")
+    filas = hoja.get("A2:D")
+
+    # Dentro del rango A:D:
+    # A = 0, B = 1, C = 2, D = 3
+    return procesar_historial(
+        filas,
+        columna_placa=1,
+        columna_inicial=2,
+        columna_final=3,
+    )
+
+
+# ============================================================
+# GENERAR REPORTE COMBINADO
+# ============================================================
+
+def generar_reporte(placas_distribucion,
+                    placas_perdidas,
+                    reportes_distribucion,
+                    reportes_perdidas):
+
+    filas_reporte = []
+
+    fuentes = [
+        (
+            "Distribución",
+            placas_distribucion,
+            reportes_distribucion,
+        ),
+        (
+            "Control de pérdidas",
+            placas_perdidas,
+            reportes_perdidas,
+        ),
+    ]
+
+    for fuente, grupos_placas, registros in fuentes:
+        for nombre_item, placas in grupos_placas.items():
+
+            for placa in sorted(placas):
+                datos = registros.get(placa, nuevo_registro())
+
+                inicial = datos["KM inicial registrado"]
+                final = datos["KM final registrado"]
+
+                if inicial and final:
+                    estado = "COMPLETÓ KM INICIAL Y FINAL"
+                elif inicial:
+                    estado = "SOLO KM INICIAL"
+                elif final:
+                    estado = "SOLO KM FINAL"
+                else:
+                    estado = "SIN REPORTE DE KM"
+
+                filas_reporte.append({
+                    "Fuente": fuente,
+                    "Ítem / Unidad": nombre_item,
+                    "Placa": placa,
+                    "Estado": estado,
+                    "KM inicial registrado": (
+                        "Sí" if inicial else "No"
+                    ),
+                    "Fecha último KM inicial": mostrar_fecha(
+                        datos["Fecha último KM inicial"]
+                    ),
+                    "KM final registrado": (
+                        "Sí" if final else "No"
+                    ),
+                    "Fecha último KM final": mostrar_fecha(
+                        datos["Fecha último KM final"]
+                    ),
+                    "Fecha último reporte": mostrar_fecha(
+                        datos["Fecha último reporte"]
+                    ),
+                    "Registros encontrados": (
+                        datos["Registros encontrados"]
+                    ),
+                })
+
+    return pd.DataFrame(filas_reporte)
+
+
+# ============================================================
+# INTERFAZ
 # ============================================================
 
 st.title("🚙 CONTROL DE REPORTE DE KILOMETRAJE")
 
 st.caption(
-    "Comparación de las placas registradas por los coordinadores "
-    "con el historial de la hoja Distribucion."
+    "Control de placas, kilometraje inicial y final, y fechas "
+    "de reporte de Distribución y Control de pérdidas."
 )
 
 try:
-    with st.spinner("Consultando Google Sheets..."):
-        placas_maestras = cargar_placas_maestras()
-        registros = cargar_reportes()
-        df = generar_reporte(placas_maestras, registros)
+    with st.spinner("Consultando los dos archivos de Google Sheets..."):
+        placas_distribucion = cargar_placas_distribucion()
+        placas_perdidas = cargar_placas_perdidas()
+
+        reportes_distribucion = cargar_reportes_distribucion()
+        reportes_perdidas = cargar_reportes_perdidas()
+
+        df = generar_reporte(
+            placas_distribucion,
+            placas_perdidas,
+            reportes_distribucion,
+            reportes_perdidas,
+        )
 
 except Exception as e:
     st.error(f"No se pudieron cargar los datos: {e}")
+    st.info(
+        "Verifica que la cuenta de servicio tenga acceso de lectura "
+        "a ambos archivos y que existan todas las hojas indicadas."
+    )
     st.stop()
 
 if df.empty:
-    st.warning("No se encontraron placas en las hojas de los ítems.")
+    st.warning("No se encontraron placas en las hojas maestras.")
     st.stop()
 
 
@@ -348,15 +460,29 @@ if df.empty:
 # FILTROS
 # ============================================================
 
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns(3)
 
 with col1:
-    item_seleccionado = st.selectbox(
-        "Seleccionar ítem",
-        ["TODOS"] + list(HOJAS_ITEMS.keys()),
+    fuente_seleccionada = st.selectbox(
+        "Fuente",
+        [
+            "TODAS",
+            "Distribución",
+            "Control de pérdidas",
+        ],
     )
 
 with col2:
+    opciones_items = ["TODOS"] + sorted(
+        df["Ítem / Unidad"].unique().tolist()
+    )
+
+    item_seleccionado = st.selectbox(
+        "Ítem / Unidad",
+        opciones_items,
+    )
+
+with col3:
     estado_seleccionado = st.selectbox(
         "Estado del reporte",
         [
@@ -370,9 +496,14 @@ with col2:
 
 filtrado = df.copy()
 
+if fuente_seleccionada != "TODAS":
+    filtrado = filtrado[
+        filtrado["Fuente"] == fuente_seleccionada
+    ]
+
 if item_seleccionado != "TODOS":
     filtrado = filtrado[
-        filtrado["Ítem"] == item_seleccionado
+        filtrado["Ítem / Unidad"] == item_seleccionado
     ]
 
 if estado_seleccionado != "TODOS":
@@ -391,10 +522,6 @@ completos = (
     filtrado["Estado"] == "COMPLETÓ KM INICIAL Y FINAL"
 ).sum()
 
-sin_reporte = (
-    filtrado["Estado"] == "SIN REPORTE DE KM"
-).sum()
-
 solo_inicial = (
     filtrado["Estado"] == "SOLO KM INICIAL"
 ).sum()
@@ -403,9 +530,13 @@ solo_final = (
     filtrado["Estado"] == "SOLO KM FINAL"
 ).sum()
 
+sin_reporte = (
+    filtrado["Estado"] == "SIN REPORTE DE KM"
+).sum()
+
 c1, c2, c3, c4, c5 = st.columns(5)
 
-c1.metric("Placas maestras", total)
+c1.metric("Placas", total)
 c2.metric("KM inicial y final", int(completos))
 c3.metric("Solo KM inicial", int(solo_inicial))
 c4.metric("Solo KM final", int(solo_final))
@@ -413,13 +544,13 @@ c5.metric("Sin reporte", int(sin_reporte))
 
 
 # ============================================================
-# RESUMEN POR ÍTEM
+# RESUMEN POR FUENTE E ÍTEM
 # ============================================================
 
-st.subheader("Resumen por ítem")
+st.subheader("Resumen por fuente e ítem")
 
 resumen = (
-    df.groupby(["Ítem", "Estado"])
+    df.groupby(["Fuente", "Ítem / Unidad", "Estado"])
     .size()
     .unstack(fill_value=0)
 )
@@ -431,18 +562,14 @@ st.dataframe(
 
 
 # ============================================================
-# TABLA DETALLADA CON FECHAS
+# TABLA DETALLADA
 # ============================================================
 
-st.subheader("Detalle de placas y fechas de reporte")
-
-st.caption(
-    "Las fechas corresponden al registro más reciente de cada tipo "
-    "de kilometraje encontrado en el historial de Distribucion."
-)
+st.subheader("Detalle de placas y fechas")
 
 columnas_tabla = [
-    "Ítem",
+    "Fuente",
+    "Ítem / Unidad",
     "Placa",
     "Estado",
     "KM inicial registrado",
@@ -455,7 +582,7 @@ columnas_tabla = [
 
 st.dataframe(
     filtrado[columnas_tabla].sort_values(
-        ["Ítem", "Estado", "Placa"]
+        ["Fuente", "Ítem / Unidad", "Estado", "Placa"]
     ),
     use_container_width=True,
     hide_index=True,
@@ -463,7 +590,7 @@ st.dataframe(
 
 
 # ============================================================
-# DESCARGAR REPORTE CSV
+# DESCARGAR CSV
 # ============================================================
 
 salida = filtrado[columnas_tabla].to_csv(
@@ -482,7 +609,7 @@ st.download_button(
 
 
 # ============================================================
-# ACTUALIZACIÓN MANUAL
+# ACTUALIZAR DATOS
 # ============================================================
 
 st.divider()
