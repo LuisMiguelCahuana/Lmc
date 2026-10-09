@@ -1,9 +1,10 @@
-
+```python
 import streamlit as st
 import gspread
 import pandas as pd
 import re
 
+from datetime import datetime, date
 from google.oauth2.service_account import Credentials
 
 
@@ -17,9 +18,7 @@ st.set_page_config(
     layout="wide",
 )
 
-SPREADSHEET_ID = (
-    "1IVNFi2DIUIRNW7jPMZ5zHA6anUtHkGeCJzN2UmooZTQ"
-)
+SPREADSHEET_ID = "1IVNFi2DIUIRNW7jPMZ5zHA6anUtHkGeCJzN2UmooZTQ"
 
 HOJAS_ITEMS = {
     "ITEM II": "ITEM_II",
@@ -29,23 +28,60 @@ HOJAS_ITEMS = {
 
 
 # ============================================================
-# ESTILOS
+# ESTILOS ADAPTABLES A MODO CLARO Y OSCURO
 # ============================================================
 
 st.markdown("""
 <style>
+/* Utilizar los colores del tema seleccionado en Streamlit */
 .stApp {
-    background: #f5f7fb;
+    background-color: var(--background-color);
+    color: var(--text-color);
 }
-h1, h2, h3 {
-    color: #12345a;
+
+h1, h2, h3, h4, p, label,
+.stMarkdown, .stCaption,
+[data-testid="stMetricLabel"],
+[data-testid="stMetricValue"],
+[data-testid="stMetricDelta"] {
+    color: var(--text-color);
+}
+
+/* Indicadores */
+[data-testid="stMetric"] {
+    background-color: var(--secondary-background-color);
+    border: 1px solid rgba(128, 128, 128, 0.30);
+    padding: 14px;
+    border-radius: 10px;
+}
+
+/* Campos de selección */
+div[data-baseweb="select"] > div {
+    background-color: var(--secondary-background-color);
+}
+
+/* Botones */
+.stDownloadButton button {
+    width: 100%;
+    border-radius: 8px;
+}
+
+/* Tablas: conservar el estilo nativo para respetar ambos temas */
+[data-testid="stDataFrame"] {
+    border: 1px solid rgba(128, 128, 128, 0.25);
+    border-radius: 8px;
+}
+
+/* Mensajes y textos secundarios */
+[data-testid="stCaptionContainer"] {
+    opacity: 0.85;
 }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ============================================================
-# CONEXIÓN
+# CONEXIÓN A GOOGLE SHEETS
 # ============================================================
 
 @st.cache_resource
@@ -65,7 +101,10 @@ def conectar_google():
 # ============================================================
 
 def normalizar_placa(valor):
-    valor = str(valor or "").strip().upper()
+    if valor is None:
+        return ""
+
+    valor = str(valor).strip().upper()
     valor = re.sub(r"[^A-Z0-9]", "", valor)
 
     if len(valor) != 6:
@@ -75,12 +114,52 @@ def normalizar_placa(valor):
 
 
 def tiene_valor(valor):
-    return str(valor or "").strip() not in ("", "None", "nan")
+    if valor is None:
+        return False
+
+    texto = str(valor).strip()
+
+    return texto.lower() not in ("", "none", "nan", "nat")
 
 
 # ============================================================
-# LEER PLACAS ACTUALIZADAS POR LOS COORDINADORES
-# PLACA = COLUMNA B
+# CONVERTIR FECHAS
+# ============================================================
+
+def convertir_fecha(valor):
+    """
+    Convierte fechas de Google Sheets a pandas.Timestamp.
+    Admite formatos como 05/10/2026 y 2026-10-05.
+    """
+
+    if not tiene_valor(valor):
+        return pd.NaT
+
+    if isinstance(valor, (datetime, date, pd.Timestamp)):
+        return pd.Timestamp(valor).normalize()
+
+    fecha = pd.to_datetime(
+        str(valor).strip(),
+        errors="coerce",
+        dayfirst=True,
+    )
+
+    if pd.isna(fecha):
+        return pd.NaT
+
+    return pd.Timestamp(fecha).normalize()
+
+
+def mostrar_fecha(valor):
+    if pd.isna(valor):
+        return "Sin fecha"
+
+    return pd.Timestamp(valor).strftime("%d/%m/%Y")
+
+
+# ============================================================
+# LEER PLACAS MAESTRAS DE LOS COORDINADORES
+# Placa: columna B de cada hoja ITEM
 # ============================================================
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -109,13 +188,14 @@ def cargar_placas_maestras():
 
 
 # ============================================================
-# LEER REPORTES DE KILOMETRAJE
+# LEER HISTORIAL DE DISTRIBUCION
 #
+# A = FECHA
 # B = PLACA
+# C = HORA INICIO
 # D = KM INICIAL
+# E = HORA FIN
 # F = KM FINAL
-#
-# Se consideran los registros de toda la hoja.
 # ============================================================
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -124,16 +204,18 @@ def cargar_reportes():
     archivo = cliente.open_by_key(SPREADSHEET_ID)
     hoja = archivo.worksheet("Distribucion")
 
-    filas = hoja.get("B2:F")
+    # Leemos A:F para obtener la fecha y los kilómetros.
+    filas = hoja.get("A2:F")
 
     registros = {}
 
     for fila in filas:
-        fila = fila + [""] * (5 - len(fila))
+        fila = fila + [""] * (6 - len(fila))
 
-        placa = normalizar_placa(fila[0])
-        km_inicial = fila[2]  # Columna D
-        km_final = fila[4]    # Columna F
+        fecha = convertir_fecha(fila[0])  # Columna A
+        placa = normalizar_placa(fila[1])  # Columna B
+        km_inicial = fila[3]               # Columna D
+        km_final = fila[5]                 # Columna F
 
         if not placa:
             continue
@@ -143,15 +225,42 @@ def cargar_reportes():
                 "KM inicial registrado": False,
                 "KM final registrado": False,
                 "Registros encontrados": 0,
+                "Fecha último reporte": pd.NaT,
+                "Fecha último KM inicial": pd.NaT,
+                "Fecha último KM final": pd.NaT,
             }
 
-        registros[placa]["Registros encontrados"] += 1
+        datos = registros[placa]
+        datos["Registros encontrados"] += 1
 
+        # Fecha más reciente en que aparece la placa.
+        if not pd.isna(fecha):
+            fecha_actual = datos["Fecha último reporte"]
+
+            if pd.isna(fecha_actual) or fecha > fecha_actual:
+                datos["Fecha último reporte"] = fecha
+
+        # KM inicial: conservar la fecha más reciente
+        # de un registro que tenga KM inicial.
         if tiene_valor(km_inicial):
-            registros[placa]["KM inicial registrado"] = True
+            datos["KM inicial registrado"] = True
 
+            fecha_actual = datos["Fecha último KM inicial"]
+
+            if not pd.isna(fecha):
+                if pd.isna(fecha_actual) or fecha > fecha_actual:
+                    datos["Fecha último KM inicial"] = fecha
+
+        # KM final: conservar la fecha más reciente
+        # de un registro que tenga KM final.
         if tiene_valor(km_final):
-            registros[placa]["KM final registrado"] = True
+            datos["KM final registrado"] = True
+
+            fecha_actual = datos["Fecha último KM final"]
+
+            if not pd.isna(fecha):
+                if pd.isna(fecha_actual) or fecha > fecha_actual:
+                    datos["Fecha último KM final"] = fecha
 
     return registros
 
@@ -183,12 +292,25 @@ def generar_reporte(placas_maestras, registros):
             else:
                 estado = "SIN REPORTE DE KM"
 
+            fecha_ultimo = datos.get(
+                "Fecha último reporte", pd.NaT
+            )
+            fecha_inicial = datos.get(
+                "Fecha último KM inicial", pd.NaT
+            )
+            fecha_final = datos.get(
+                "Fecha último KM final", pd.NaT
+            )
+
             reportes.append({
                 "Ítem": nombre_item,
                 "Placa": placa,
                 "Estado": estado,
                 "KM inicial registrado": "Sí" if inicial else "No",
+                "Fecha último KM inicial": mostrar_fecha(fecha_inicial),
                 "KM final registrado": "Sí" if final else "No",
+                "Fecha último KM final": mostrar_fecha(fecha_final),
+                "Fecha último reporte": mostrar_fecha(fecha_ultimo),
                 "Registros encontrados": datos.get(
                     "Registros encontrados", 0
                 ),
@@ -198,13 +320,14 @@ def generar_reporte(placas_maestras, registros):
 
 
 # ============================================================
-# INTERFAZ
+# INTERFAZ PRINCIPAL
 # ============================================================
 
 st.title("🚙 CONTROL DE REPORTE DE KILOMETRAJE")
+
 st.caption(
-    "Comparación de placas actualizadas por los coordinadores "
-    "frente a los registros de la hoja Distribucion."
+    "Comparación de las placas registradas por los coordinadores "
+    "con el historial de la hoja Distribucion."
 )
 
 try:
@@ -216,7 +339,6 @@ try:
 except Exception as e:
     st.error(f"No se pudieron cargar los datos: {e}")
     st.stop()
-
 
 if df.empty:
     st.warning("No se encontraron placas en las hojas de los ítems.")
@@ -265,22 +387,30 @@ if estado_seleccionado != "TODOS":
 # ============================================================
 
 total = len(filtrado)
+
 completos = (
     filtrado["Estado"] == "COMPLETÓ KM INICIAL Y FINAL"
 ).sum()
+
 sin_reporte = (
     filtrado["Estado"] == "SIN REPORTE DE KM"
 ).sum()
+
 solo_inicial = (
     filtrado["Estado"] == "SOLO KM INICIAL"
 ).sum()
 
-c1, c2, c3, c4 = st.columns(4)
+solo_final = (
+    filtrado["Estado"] == "SOLO KM FINAL"
+).sum()
+
+c1, c2, c3, c4, c5 = st.columns(5)
 
 c1.metric("Placas maestras", total)
 c2.metric("KM inicial y final", int(completos))
 c3.metric("Solo KM inicial", int(solo_inicial))
-c4.metric("Sin reporte", int(sin_reporte))
+c4.metric("Solo KM final", int(solo_final))
+c5.metric("Sin reporte", int(sin_reporte))
 
 
 # ============================================================
@@ -302,23 +432,42 @@ st.dataframe(
 
 
 # ============================================================
-# TABLA DETALLADA
+# TABLA DETALLADA CON FECHAS
 # ============================================================
 
-st.subheader("Detalle de placas")
+st.subheader("Detalle de placas y fechas de reporte")
+
+st.caption(
+    "Las fechas corresponden al registro más reciente de cada tipo "
+    "de kilometraje encontrado en el historial de Distribucion."
+)
+
+columnas_tabla = [
+    "Ítem",
+    "Placa",
+    "Estado",
+    "KM inicial registrado",
+    "Fecha último KM inicial",
+    "KM final registrado",
+    "Fecha último KM final",
+    "Fecha último reporte",
+    "Registros encontrados",
+]
 
 st.dataframe(
-    filtrado.sort_values(["Ítem", "Estado", "Placa"]),
+    filtrado[columnas_tabla].sort_values(
+        ["Ítem", "Estado", "Placa"]
+    ),
     use_container_width=True,
     hide_index=True,
 )
 
 
 # ============================================================
-# DESCARGAR EXCEL
+# DESCARGAR REPORTE CSV
 # ============================================================
 
-salida = filtrado.to_csv(
+salida = filtrado[columnas_tabla].to_csv(
     index=False,
     sep=";",
     encoding="utf-8-sig",
@@ -331,3 +480,15 @@ st.download_button(
     mime="text/csv",
     use_container_width=True,
 )
+
+
+# ============================================================
+# ACTUALIZACIÓN MANUAL
+# ============================================================
+
+st.divider()
+
+if st.button("🔄 ACTUALIZAR DATOS"):
+    st.cache_data.clear()
+    st.rerun()
+```
