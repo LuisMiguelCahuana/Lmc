@@ -1,4 +1,3 @@
-```python
 import streamlit as st
 import gspread
 import pandas as pd
@@ -491,4 +490,3 @@ st.divider()
 if st.button("🔄 ACTUALIZAR DATOS"):
     st.cache_data.clear()
     st.rerun()
-```
