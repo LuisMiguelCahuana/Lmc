@@ -1181,25 +1181,36 @@ with tab_diario:
                 vista_diaria["Estado diario"] == estado_diario
             ]
 
-        # Indicadores.
-        total_dias = len(vista_diaria)
+        # Indicadores del reporte diario
+        total_placas = vista_diaria["Placa"].nunique()
+
+        dias_seleccionados = (
+            fecha_fin - fecha_inicio
+        ).days + 1
+
+        total_placa_dias = len(vista_diaria)
+
         dias_reportados = int(
             (vista_diaria["Reporte"] == "SÍ").sum()
         )
+
         dias_sin_reporte = int(
             (vista_diaria["Reporte"] == "NO").sum()
         )
+
         porcentaje = (
-            dias_reportados / total_dias * 100
-            if total_dias else 0
+            dias_reportados / total_placa_dias * 100
+            if total_placa_dias else 0
         )
 
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3, c4, c5 = st.columns(5)
 
-        c1.metric("Placa-días evaluados", total_dias)
-        c2.metric("Días con reporte", dias_reportados)
-        c3.metric("Días sin reporte", dias_sin_reporte)
-        c4.metric("Cumplimiento", f"{porcentaje:.1f}%")
+        c1.metric("Placas evaluadas", total_placas)
+        c2.metric("Días seleccionados", dias_seleccionados)
+        c3.metric("Placa-días evaluados", total_placa_dias)
+        c4.metric("Placa-días sin reporte", dias_sin_reporte)
+        c5.metric("Cumplimiento", f"{porcentaje:.1f}%")
+
 
         st.subheader("Detalle por fecha y placa")
 
