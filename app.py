@@ -328,6 +328,153 @@ def cargar_reportes_perdidas():
         columna_inicial=2,
         columna_final=3,
     )
+# ============================================================
+# CARGAR DETALLE DIARIO DE REPORTES
+# ============================================================
+
+@st.cache_data(ttl=300, show_spinner=False)
+def cargar_detalle_diario(spreadsheet_id, nombre_hoja, tipo):
+    cliente = conectar_google()
+    archivo = cliente.open_by_key(spreadsheet_id)
+    hoja = archivo.worksheet(nombre_hoja)
+
+    if tipo == "Distribución":
+        filas = hoja.get("A2:F")
+        columna_placa = 1
+        columna_inicial = 3
+        columna_final = 5
+    else:
+        filas = hoja.get("A2:D")
+        columna_placa = 1
+        columna_inicial = 2
+        columna_final = 3
+
+    registros = []
+
+    for fila_original in filas:
+        fila = list(fila_original)
+        fila += [""] * max(0, 6 - len(fila))
+
+        fecha = convertir_fecha(fila[0])
+        placa = normalizar_placa(fila[columna_placa])
+
+        if not placa or pd.isna(fecha):
+            continue
+
+        km_inicial = fila[columna_inicial]
+        km_final = fila[columna_final]
+
+        registros.append({
+            "Fuente": tipo,
+            "Fecha": fecha,
+            "Placa": placa,
+            "KM inicial": (
+                "Sí" if tiene_valor(km_inicial) else "No"
+            ),
+            "KM final": (
+                "Sí" if tiene_valor(km_final) else "No"
+            ),
+            "Estado diario": (
+                "COMPLETO"
+                if tiene_valor(km_inicial) and tiene_valor(km_final)
+                else "SOLO KM INICIAL"
+                if tiene_valor(km_inicial)
+                else "SOLO KM FINAL"
+                if tiene_valor(km_final)
+                else "SIN KM"
+            ),
+        })
+
+    return pd.DataFrame(registros)
+
+
+def generar_reporte_diario(
+    grupos_maestros,
+    detalle,
+    fuente,
+    fecha_inicio,
+    fecha_fin,
+):
+    filas = []
+
+    # Obtener las placas que corresponden a la fuente elegida.
+    placas_por_item = {}
+
+    for nombre_item, placas in grupos_maestros.items():
+        placas_por_item[nombre_item] = placas
+
+    fechas = pd.date_range(
+        start=fecha_inicio,
+        end=fecha_fin,
+        freq="D",
+    )
+
+    # Agrupar los registros por placa y fecha.
+    if not detalle.empty:
+        detalle_filtrado = detalle[
+            (detalle["Fecha"] >= pd.Timestamp(fecha_inicio))
+            & (detalle["Fecha"] <= pd.Timestamp(fecha_fin))
+        ].copy()
+
+        resumen_diario = (
+            detalle_filtrado
+            .groupby(["Placa", "Fecha"], as_index=False)
+            .agg({
+                "KM inicial": lambda x: (
+                    "Sí" if (x == "Sí").any() else "No"
+                ),
+                "KM final": lambda x: (
+                    "Sí" if (x == "Sí").any() else "No"
+                ),
+            })
+        )
+    else:
+        resumen_diario = pd.DataFrame(
+            columns=["Placa", "Fecha", "KM inicial", "KM final"]
+        )
+
+    # Crear una fila por cada placa y cada fecha del rango.
+    for nombre_item, placas in placas_por_item.items():
+        for placa in sorted(placas):
+            for fecha in fechas:
+                coincidencia = resumen_diario[
+                    (resumen_diario["Placa"] == placa)
+                    & (resumen_diario["Fecha"] == fecha)
+                ]
+
+                if coincidencia.empty:
+                    km_inicial = "No"
+                    km_final = "No"
+                    estado = "SIN REPORTE"
+                else:
+                    registro = coincidencia.iloc[0]
+                    km_inicial = registro["KM inicial"]
+                    km_final = registro["KM final"]
+
+                    if km_inicial == "Sí" and km_final == "Sí":
+                        estado = "COMPLETO"
+                    elif km_inicial == "Sí":
+                        estado = "SOLO KM INICIAL"
+                    elif km_final == "Sí":
+                        estado = "SOLO KM FINAL"
+                    else:
+                        estado = "REPORTÓ SIN KM"
+
+                filas.append({
+                    "Fuente": fuente,
+                    "Ítem / Unidad": nombre_item,
+                    "Placa": placa,
+                    "Fecha": fecha,
+                    "Día": fecha.strftime("%A"),
+                    "Reporte": (
+                        "SÍ" if estado != "SIN REPORTE" else "NO"
+                    ),
+                    "KM inicial": km_inicial,
+                    "KM final": km_final,
+                    "Estado diario": estado,
+                })
+
+    return pd.DataFrame(filas)
 
 
 # ============================================================
@@ -639,6 +786,19 @@ try:
         # Historiales de kilometraje
         reportes_distribucion = cargar_reportes_distribucion()
         reportes_perdidas = cargar_reportes_perdidas()
+        # Historial detallado para el reporte diario
+        detalle_distribucion = cargar_detalle_diario(
+            SPREADSHEET_ID_DISTRIBUCION,
+            "Distribucion",
+            "Distribución",
+        )
+
+        detalle_perdidas = cargar_detalle_diario(
+            SPREADSHEET_ID_PERDIDAS,
+            "ControlPerdidas",
+            "Control de pérdidas",
+        )
+
 
         # Reporte de kilometraje original
         df = generar_reporte_kilometraje(
@@ -676,10 +836,11 @@ except Exception as e:
 # PESTAÑAS PRINCIPALES
 # ============================================================
 
-tab_km, tab_items, tab_unidades = st.tabs([
+tab_km, tab_items, tab_unidades, tab_diario = st.tabs([
     "📊 Reporte de kilometraje",
     "🔎 Ítems vs ControlPerdidas",
     "🚙 Unidades vs Distribucion",
+    "📅 Reporte diario de placas",
 ])
 
 
@@ -877,6 +1038,249 @@ with tab_unidades:
         "cruce_unidades_distribucion.csv",
         "unidades",
     )
+# ============================================================
+# PESTAÑA 4: REPORTE DIARIO DE PLACAS
+# ============================================================
+
+with tab_diario:
+
+    st.subheader("📅 Reporte diario de placas")
+    st.caption(
+        "Consulta qué fechas registró cada placa y cuáles "
+        "no presentan registros en el historial."
+    )
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        fuente_diaria = st.selectbox(
+            "Fuente del reporte",
+            ["Distribución", "Control de pérdidas"],
+            key="diario_fuente",
+        )
+
+    with c2:
+        estado_diario = st.selectbox(
+            "Estado diario",
+            [
+                "TODOS",
+                "REPORTÓ",
+                "SIN REPORTE",
+                "COMPLETO",
+                "SOLO KM INICIAL",
+                "SOLO KM FINAL",
+                "REPORTÓ SIN KM",
+            ],
+            key="diario_estado",
+        )
+
+    # Elegir las placas maestras y el historial según la fuente.
+    if fuente_diaria == "Distribución":
+        grupos_diarios = placas_distribucion
+        detalle_diario = detalle_distribucion
+    else:
+        grupos_diarios = placas_perdidas
+        detalle_diario = detalle_perdidas
+
+    fechas_disponibles = []
+
+    if not detalle_diario.empty:
+        fechas_disponibles = (
+            detalle_diario["Fecha"].dropna().tolist()
+        )
+
+    fecha_actual = date.today()
+
+    if fechas_disponibles:
+        fecha_minima = min(fechas_disponibles).date()
+        fecha_maxima = max(fechas_disponibles).date()
+    else:
+        fecha_minima = fecha_actual
+        fecha_maxima = fecha_actual
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        fecha_inicio = st.date_input(
+            "Fecha inicial",
+            value=fecha_minima,
+            key="diario_fecha_inicio",
+        )
+
+    with c2:
+        fecha_fin = st.date_input(
+            "Fecha final",
+            value=fecha_maxima,
+            key="diario_fecha_fin",
+        )
+
+    if fecha_inicio > fecha_fin:
+        st.error(
+            "La fecha inicial no puede ser posterior a la fecha final."
+        )
+        st.stop()
+
+    # Generar la matriz de placa por día.
+    df_diario = generar_reporte_diario(
+        grupos_maestros=grupos_diarios,
+        detalle=detalle_diario,
+        fuente=fuente_diaria,
+        fecha_inicio=fecha_inicio,
+        fecha_fin=fecha_fin,
+    )
+
+    if df_diario.empty:
+        st.warning(
+            "No se encontraron placas maestras para esta fuente."
+        )
+    else:
+
+        # Filtros adicionales.
+        c1, c2 = st.columns(2)
+
+        with c1:
+            item_diario = st.selectbox(
+                "Ítem / Unidad",
+                ["TODOS"] + sorted(
+                    df_diario["Ítem / Unidad"].unique().tolist()
+                ),
+                key="diario_item",
+            )
+
+        with c2:
+            placa_diaria = st.selectbox(
+                "Placa",
+                ["TODAS"] + sorted(
+                    df_diario["Placa"].unique().tolist()
+                ),
+                key="diario_placa",
+            )
+
+        vista_diaria = df_diario.copy()
+
+        if item_diario != "TODOS":
+            vista_diaria = vista_diaria[
+                vista_diaria["Ítem / Unidad"] == item_diario
+            ]
+
+        if placa_diaria != "TODAS":
+            vista_diaria = vista_diaria[
+                vista_diaria["Placa"] == placa_diaria
+            ]
+
+        if estado_diario == "REPORTÓ":
+            vista_diaria = vista_diaria[
+                vista_diaria["Reporte"] == "SÍ"
+            ]
+        elif estado_diario == "SIN REPORTE":
+            vista_diaria = vista_diaria[
+                vista_diaria["Reporte"] == "NO"
+            ]
+        elif estado_diario != "TODOS":
+            vista_diaria = vista_diaria[
+                vista_diaria["Estado diario"] == estado_diario
+            ]
+
+        # Indicadores.
+        total_dias = len(vista_diaria)
+        dias_reportados = int(
+            (vista_diaria["Reporte"] == "SÍ").sum()
+        )
+        dias_sin_reporte = int(
+            (vista_diaria["Reporte"] == "NO").sum()
+        )
+        porcentaje = (
+            dias_reportados / total_dias * 100
+            if total_dias else 0
+        )
+
+        c1, c2, c3, c4 = st.columns(4)
+
+        c1.metric("Placa-días evaluados", total_dias)
+        c2.metric("Días con reporte", dias_reportados)
+        c3.metric("Días sin reporte", dias_sin_reporte)
+        c4.metric("Cumplimiento", f"{porcentaje:.1f}%")
+
+        st.subheader("Detalle por fecha y placa")
+
+        vista_mostrar = vista_diaria.copy()
+        vista_mostrar["Fecha"] = vista_mostrar["Fecha"].dt.strftime(
+            "%d/%m/%Y"
+        )
+
+        st.dataframe(
+            vista_mostrar.sort_values(
+                ["Ítem / Unidad", "Placa", "Fecha"]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        csv_diario = vista_mostrar.to_csv(
+            index=False,
+            sep=";",
+            encoding="utf-8-sig",
+        ).encode("utf-8-sig")
+
+        st.download_button(
+            "📥 DESCARGAR REPORTE DIARIO CSV",
+            data=csv_diario,
+            file_name="reporte_diario_placas.csv",
+            mime="text/csv",
+            use_container_width=True,
+            key="descargar_diario_placas",
+        )
+
+        # Tabla adicional: resumen por placa.
+        st.subheader("Resumen de cumplimiento por placa")
+
+        if not vista_diaria.empty:
+            resumen_placas = (
+                vista_diaria.groupby(
+                    ["Fuente", "Ítem / Unidad", "Placa"],
+                    as_index=False,
+                )
+                .agg(
+                    **{
+                        "Días evaluados": ("Fecha", "count"),
+                        "Días con reporte": (
+                            "Reporte",
+                            lambda x: (x == "SÍ").sum(),
+                        ),
+                        "Días sin reporte": (
+                            "Reporte",
+                            lambda x: (x == "NO").sum(),
+                        ),
+                    }
+                )
+            )
+
+            resumen_placas["Cumplimiento (%)"] = (
+                resumen_placas["Días con reporte"]
+                / resumen_placas["Días evaluados"]
+                * 100
+            ).round(1)
+
+            st.dataframe(
+                resumen_placas,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            csv_resumen = resumen_placas.to_csv(
+                index=False,
+                sep=";",
+                encoding="utf-8-sig",
+            ).encode("utf-8-sig")
+
+            st.download_button(
+                "📥 DESCARGAR RESUMEN POR PLACA",
+                data=csv_resumen,
+                file_name="resumen_cumplimiento_placas.csv",
+                mime="text/csv",
+                use_container_width=True,
+                key="descargar_resumen_placas",
+            )
 
 
 # ============================================================
